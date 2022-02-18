@@ -6,10 +6,11 @@ import CoinbasePro, {
   ProductEvent,
 } from 'coinbase-pro-node';
 import { addDays, addMinutes } from 'date-fns';
-import Decimal from 'decimal.js';
 import { interval, Observable, Subject, switchMap, tap, takeUntil, from } from 'rxjs';
 import { Repository } from 'typeorm';
 import { CandleEntity, EthMinuteCandle } from './eth.entity';
+
+
 
 @Injectable()
 export class EthService implements OnModuleInit {
