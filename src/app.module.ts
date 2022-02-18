@@ -1,31 +1,16 @@
-import { Module } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { TypeOrmModule } from '@nestjs/typeorm';
 import CoinbasePro from 'coinbase-pro-node';
+import knex from 'knex';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
-import { EthMinuteCandle } from './eth/eth.entity';
 import { EthService } from './eth/eth.service';
 
+export const KNEX_CLIENT = 'KNEX_CLIENT';
 
 @Module({
   imports: [
     ConfigModule.forRoot(),
-    TypeOrmModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (configService: ConfigService) => ({
-        type: 'postgres',
-        host: 'localhost',
-        port: 5432,
-        username: configService.get('POSTGRES_USER'),
-        password: configService.get('POSTGRES_PASSWORD'),
-        database: 'dubcdr',
-        synchronize: true,
-        entities: [EthMinuteCandle]
-      })
-    }),
-    TypeOrmModule.forFeature([EthMinuteCandle])
   ],
   controllers: [AppController],
   providers: [
@@ -41,8 +26,25 @@ import { EthService } from './eth/eth.service';
           useSandbox: false,
         });
         return client;
+      },
+    },
+    {
+      provide: 'KNEX_CLIENT',
+      inject: [ConfigService],
+      useFactory: (configService: ConfigService) => {
+        return knex({
+          client: 'pg',
+          connection: {
+            host: 'localhost',
+            port: 5432,
+            user: configService.get('POSTGRES_USER'),
+            password: configService.get('POSTGRES_PASSWORD'),
+            database: configService.get('POSTGRES_DB')
+          }
+        })
       }
     },
+
     EthService
   ],
 })
