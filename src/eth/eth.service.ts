@@ -20,6 +20,7 @@ import {
   takeUntil,
   from,
   catchError,
+  of,
 } from 'rxjs';
 
 export interface DbCandle {
@@ -48,10 +49,10 @@ abstract class CandleService implements OnModuleInit {
   }
 
   async onModuleInit() {
+    this.setupListen();
     const date = new Date();
     const startDate = addDays(date, -7);
-    const endDate = addMinutes(date, -60);
-    this.getHistoricData(startDate, endDate)
+    this.getHistoricData(startDate, date)
       .pipe(
         tap((historic) => {
           this.logger.log(
@@ -60,17 +61,19 @@ abstract class CandleService implements OnModuleInit {
         }),
         switchMap((apiResp) => {
           return from(this.writeCandles(apiResp)).pipe(
-            // tap((resp) => {
-            //   this.logger.log(resp);
-            // }),
-            catchError((err) => {
-              // this.logger.log(err);
-              return from(this.handleUniqueError(apiResp));
+            catchError((_err) => {
+              return from(this.handleUniqueError(apiResp))
+                .pipe(
+                  catchError(() => {
+                    this.logger.log("Not retrying twice");
+                    return of()
+                  })
+                );
             }),
           );
         }),
       )
-      .subscribe((dbResp) => {
+      .subscribe((_dbResp) => {
         this.logger.log(`Inserted ${this.granularity_string} candles`);
       });
   }
@@ -85,6 +88,9 @@ abstract class CandleService implements OnModuleInit {
           granularity,
           candle.openTimeInISO,
         );
+        this.writeCandles([candle]).then(resp => {
+          this.logger.log("Wrote new candle")
+        });
       },
     );
 
@@ -148,7 +154,7 @@ abstract class CandleService implements OnModuleInit {
 
   async handleUniqueError(candles: Candle[]) {
     this.logger.log(`Handling unique error`);
-    const previous: DbCandle[] = await this.knexClient(this.tableName)
+    const previous = await this.knexClient<DbCandle>(this.tableName)
       .whereBetween('open_timestamp', [
         candles[0].openTimeInISO,
         candles[candles.length - 1].openTimeInISO,
@@ -163,14 +169,14 @@ abstract class CandleService implements OnModuleInit {
       return;
     }
 
-    const lastTime = previous[previous.length - 1].open_timestamp;
-    const lastIndex = candles.findIndex((c) =>
-      isEqual(lastTime, new Date(c.openTimeInISO)),
-    );
+    const retries = candles.filter(apiCandle => !previous.some(
+      dbCandle => isEqual(
+        dbCandle.open_timestamp, new Date(apiCandle.openTimeInISO)
+      )
+    ));
 
-    this.logger.log(`Trying to put candles after ${lastTime}`);
 
-    return await this.writeCandles(candles.slice(lastIndex + 1));
+    return await this.writeCandles(retries);
   }
 }
 
