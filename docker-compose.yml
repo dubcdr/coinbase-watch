@@ -8,6 +8,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme}
       PGDATA: /data/postgres
+    volumes:
+      - ./sql/create.sql:/docker-entrypoint-initdb.d/init.sql
     # volumes:
     #    - postgres:/data/postgres
     ports:
