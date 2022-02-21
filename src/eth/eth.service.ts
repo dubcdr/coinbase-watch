@@ -9,7 +9,7 @@ import CoinbasePro, {
   CandleGranularity,
   ProductEvent,
 } from 'coinbase-pro-node';
-import { addDays, addMinutes, isEqual } from 'date-fns';
+import { addSeconds, isEqual } from 'date-fns';
 import { Knex } from 'knex';
 import {
   interval,
@@ -21,6 +21,7 @@ import {
   from,
   catchError,
   of,
+  map,
 } from 'rxjs';
 
 export interface DbCandle {
@@ -29,108 +30,69 @@ export interface DbCandle {
   close: number;
   high: number;
   low: number;
-}
+};
+
+export enum ProductSymbols {
+  ETH = 'ETH',
+  USD = 'USD'
+};
 
 abstract class CandleService implements OnModuleInit {
   private readonly logger: Logger;
-  abstract granularity: CandleGranularity;
-  abstract product: string;
+  product: string;
 
-  get tableName(): string {
-    return 'eth_1m_candle';
-  }
-
-  get granularity_string(): string {
-    return '1m';
-  }
-
-  constructor(protected client: CoinbasePro, protected knexClient: Knex) {
-    this.logger = new Logger(this.tableName);
+  constructor(protected client: CoinbasePro, protected knexClient: Knex, protected symbols: ProductSymbols[]) {
+    this.logger = new Logger();
+    this.product = `${symbols[0]}-${symbols[1]}`
   }
 
   async onModuleInit() {
-    this.setupListen();
-    const date = new Date();
-    const startDate = addDays(date, -7);
-    this.getHistoricData(startDate, date)
-      .pipe(
-        tap((historic) => {
-          this.logger.log(
-            `Got data for ${historic[0].openTimeInISO}, closing price ${historic[0].close}`,
-          );
-        }),
-        switchMap((apiResp) => {
-          return from(this.writeCandles(apiResp)).pipe(
-            catchError((_err) => {
-              return from(this.handleUniqueError(apiResp))
-                .pipe(
-                  catchError(() => {
-                    this.logger.log("Not retrying twice");
-                    return of()
-                  })
-                );
-            }),
-          );
-        }),
-      )
-      .subscribe((_dbResp) => {
-        this.logger.log(`Inserted ${this.granularity_string} candles`);
-      });
+    await this._initTables();
+    this._setupListeners();
+    this._getHistoricData();
   }
 
-  async setupListen() {
-    this.client.rest.on(
-      ProductEvent.NEW_CANDLE,
-      (productId: string, granularity: CandleGranularity, candle: Candle) => {
-        this.logger.log(
-          'Recent candle',
-          productId,
-          granularity,
-          candle.openTimeInISO,
-        );
-        this.writeCandles([candle]).then(resp => {
-          this.logger.log("Wrote new candle")
-        });
-      },
-    );
-
-    // 3. Get latest candle
-    const candles = await this.client.rest.product.getCandles(this.product, {
-      granularity: this.granularity,
-    });
-    const latestCandle = candles[candles.length - 1];
-    const latestOpen = latestCandle.openTimeInISO;
-    this.logger.log(
-      'Initial candle',
-      this.product,
-      this.granularity,
-      latestOpen,
-    );
-    // console.table(latestCandle);
-
-    // 4. Subscribe to upcoming candles
-    this.client.rest.product.watchCandles(
-      this.product,
-      this.granularity,
-      latestOpen,
-    );
+  private async _getHistoricData() {
+    // number of historical candles to get
+    const numCandles = 1000;
+    this.logger.log(`Starting to fetch ${numCandles} candles for ${this._getGranularityValues().join(' ')}`);
+    for (const granularity of this._getGranularityValues()) {
+      const date = new Date();
+      const mostRecentCandle = await this._findCandleExtreme(granularity, true);
+      this.logger.log(`Most recent candle for ${granularity} granularity is ${mostRecentCandle === undefined ? 'None' : mostRecentCandle}`);
+      let startDate: Date;
+      if (mostRecentCandle === undefined) {
+        startDate = addSeconds(date, -1 * numCandles * granularity);
+      } else {
+        startDate = mostRecentCandle;
+      }
+      this.logger.log(`Starting to fetch historical data for granularity ${granularity} between ${startDate} and ${date}`)
+      this._getHistoricDataForGranularity(startDate, date, granularity).pipe(
+        switchMap(candles => {
+          return this.writeCandles(candles, granularity)
+        })
+      ).subscribe()
+    }
   }
 
-  getHistoricData(start: Date, end: Date): Observable<Candle[]> {
+  // candle granularity is in seconds
+  // can fetch 300 candles in one api call
+  _getHistoricDataForGranularity(start: Date, end: Date, granularity: CandleGranularity): Observable<Candle[]> {
+    const intervalTime = 299 * granularity;
     const finished = new Subject<void>();
-    let tempEnd = addMinutes(start, 299);
-    return interval(200).pipe(
+    let tempEnd = addSeconds(start, intervalTime);
+    return interval(1000).pipe(
       takeUntil(finished),
       switchMap(() => {
         return this.client.rest.product.getCandles('ETH-USD', {
-          granularity: CandleGranularity.ONE_MINUTE,
+          granularity,
           start: start.toISOString(),
           end: tempEnd.toISOString(),
         });
       }),
       tap(() => {
         start = tempEnd;
-        tempEnd = addMinutes(start, 299);
+        tempEnd = addSeconds(start, intervalTime);
 
         if (start > end) {
           finished.next();
@@ -140,7 +102,42 @@ abstract class CandleService implements OnModuleInit {
     );
   }
 
-  writeCandles(candles: Candle[]) {
+  private _setupListeners() {
+    this.client.rest.on(
+      ProductEvent.NEW_CANDLE,
+      (productId: string, g: CandleGranularity, candle: Candle) => {
+        this.logger.log(
+          'Recent candle',
+          productId,
+          g,
+          candle.openTimeInISO,
+        );
+        this.writeCandles([candle], g).subscribe();
+      },
+    );
+
+    this.logger.log(`Add global handler for candle listening...`)
+    for (const granularity of this._getGranularityValues()) {
+      this.logger.log(`Initilizing listener for ${granularity} granularity...`);
+      this._setupListen(granularity);
+    }
+  }
+
+  private _setupListen(granularity: CandleGranularity) {
+    this.client.rest.product.getCandles(this.product, {
+      granularity
+    }).then(candles => {
+      const latestCandle = candles[candles.length - 1];
+      this.client.rest.product.watchCandles(
+        this.product,
+        granularity,
+        latestCandle.openTimeInISO
+      );
+    });
+  }
+
+
+  writeCandles(candles: Candle[], granularity: CandleGranularity): Observable<number[]> {
     const candleData = candles.map((candle) => ({
       open_timestamp: candle.openTimeInISO,
       high: candle.high,
@@ -149,46 +146,107 @@ abstract class CandleService implements OnModuleInit {
       close: candle.close,
       volume: candle.volume,
     }));
-    return this.knexClient(this.tableName).insert(candleData);
+    if (candles.length > 0) {
+      this.logger.log(`Attempting to write candles for ${candles[0].openTimeInISO} - ${candles[candles.length - 1].openTimeInISO}`)
+    }
+    return from(this.knexClient(this._getProductDbName(granularity)).insert(candleData))
+      .pipe(
+        catchError((err) => {
+          if (this.isUniqueErr(err)) {
+            return this.handleUniqueError(candles, granularity);
+          }
+
+          throw 'Unhandled write candle error: ' + err;
+        })
+      );
+  }
+  async isUniqueErr(_err: Error) {
+    return true;
   }
 
-  async handleUniqueError(candles: Candle[]) {
+  handleUniqueError(candles: Candle[], granularity: CandleGranularity): Observable<number[]> {
     this.logger.log(`Handling unique error`);
-    const previous = await this.knexClient<DbCandle>(this.tableName)
+    const previousPromise = this.knexClient<DbCandle>(this._getProductDbName(granularity))
       .whereBetween('open_timestamp', [
         candles[0].openTimeInISO,
         candles[candles.length - 1].openTimeInISO,
       ])
       .orderBy('open_timestamp', 'asc');
 
-    if (previous.length === candles.length) {
-      this.logger.log(
-        `Candles already exist between ${candles[0].openTimeInISO} and ${candles[candles.length - 1].openTimeInISO
-        }`,
-      );
-      return;
+    return from(previousPromise).pipe(
+      map(previous => {
+
+        if (previous.length === candles.length) {
+          this.logger.log(
+            `Candles already exist between ${candles[0].openTimeInISO} and ${candles[candles.length - 1].openTimeInISO
+            }`,
+          );
+          return of([] as number[]);
+        }
+
+        const retries = candles.filter(apiCandle => !previous.some(
+          dbCandle => isEqual(
+            dbCandle.open_timestamp, new Date(apiCandle.openTimeInISO)
+          )
+        ));
+
+
+        return retries;
+      }),
+      switchMap(retries => {
+        if (Array.isArray(retries)) {
+          return this.writeCandles(retries, granularity);
+        } else {
+          return retries;
+        }
+      })
+    )
+  }
+
+  private async _initTables() {
+    for await (const granularity of this._getGranularityValues()) {
+      const tableName: string = this._getProductDbName(granularity);
+      if (!(await this.knexClient.schema.hasTable(tableName))) {
+        await this.knexClient.schema.createTableLike(tableName, 'candle', (_t) => { });
+        this.logger.log(`${tableName} created...`)
+      }
+    }
+  }
+
+  // UTILITY METHODS
+
+  private _getGranularityValues(): number[] {
+    return Object.keys(CandleGranularity).map(g => parseInt(g)).filter(g => !isNaN(g));
+  }
+
+  private async _findCandleExtreme(granularity: CandleGranularity, mostRecent: boolean): Promise<Date | undefined> {
+    const latestCandle = await this.knexClient<DbCandle>(this._getProductDbName(granularity))
+      .orderBy('open_timestamp', mostRecent ? 'desc' : 'asc')
+      .limit(1)
+      .select('open_timestamp')
+
+    if (latestCandle.length === 0) {
+      return undefined;
     }
 
-    const retries = candles.filter(apiCandle => !previous.some(
-      dbCandle => isEqual(
-        dbCandle.open_timestamp, new Date(apiCandle.openTimeInISO)
-      )
-    ));
+    return latestCandle[0].open_timestamp;
+  }
 
-
-    return await this.writeCandles(retries);
+  private _getProductDbName(granularity: CandleGranularity): string {
+    let str = this.product.toLowerCase();
+    str = str.replace('-', '_');
+    str = `${str}_${granularity}`
+    return str;
   }
 }
 
 @Injectable()
 export class EthService extends CandleService {
-  product = 'ETH-USD';
-  granularity = CandleGranularity.ONE_MINUTE;
 
   constructor(
     @Inject('COINBASE_CLIENT') protected client: CoinbasePro,
     @Inject('KNEX_CLIENT') protected knexClient: Knex,
   ) {
-    super(client, knexClient);
+    super(client, knexClient, [ProductSymbols.ETH, ProductSymbols.USD]);
   }
 }
