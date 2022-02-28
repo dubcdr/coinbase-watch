@@ -22,9 +22,9 @@ create TABLE IF NOT EXISTS candle (
   volume DECIMAL ( 16, 8 ) NOT NULL
 );
 
-create TABLE IF NOT EXISTS eth_1m_candle (LIKE candle INCLUDING ALL);
-create TABLE IF NOT EXISTS eth_5m_candle (LIKE candle INCLUDING ALL);
-create TABLE IF NOT EXISTS eth_15m_candle (LIKE candle INCLUDING ALL);
-create TABLE IF NOT EXISTS eth_1hr_candle (LIKE candle INCLUDING ALL);
-create TABLE IF NOT EXISTS eth_6hr_candle (LIKE candle INCLUDING ALL);
-create TABLE IF NOT EXISTS eth_1d_candle (LIKE candle INCLUDING ALL);
+-- create TABLE IF NOT EXISTS eth_1m_candle (LIKE candle INCLUDING ALL);
+-- create TABLE IF NOT EXISTS eth_5m_candle (LIKE candle INCLUDING ALL);
+-- create TABLE IF NOT EXISTS eth_15m_candle (LIKE candle INCLUDING ALL);
+-- create TABLE IF NOT EXISTS eth_1hr_candle (LIKE candle INCLUDING ALL);
+-- create TABLE IF NOT EXISTS eth_6hr_candle (LIKE candle INCLUDING ALL);
+-- create TABLE IF NOT EXISTS eth_1d_candle (LIKE candle INCLUDING ALL);

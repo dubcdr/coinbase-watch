@@ -9,9 +9,7 @@ import { EthService } from './eth/eth.service';
 export const KNEX_CLIENT = 'KNEX_CLIENT';
 
 @Module({
-  imports: [
-    ConfigModule.forRoot(),
-  ],
+  imports: [ConfigModule.forRoot()],
   controllers: [AppController],
   providers: [
     AppService,
@@ -39,13 +37,13 @@ export const KNEX_CLIENT = 'KNEX_CLIENT';
             port: 5432,
             user: configService.get('POSTGRES_USER'),
             password: configService.get('POSTGRES_PASSWORD'),
-            database: configService.get('POSTGRES_DB')
-          }
-        })
-      }
+            database: configService.get('POSTGRES_DB'),
+          },
+        });
+      },
     },
 
-    EthService
+    EthService,
   ],
 })
-export class AppModule { }
+export class AppModule {}
