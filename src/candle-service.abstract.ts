@@ -37,9 +37,6 @@ export abstract class CandleService implements OnModuleInit {
     this.product = `${symbols[0]}-${symbols[1]}`;
     this.logger = new Logger(this.product);
     this._numCandles = parseInt(this.configService.get('NUM_CANDLES'));
-    this.logger.log(
-      `does num candles come in as a number ${typeof this._numCandles}`,
-    );
   }
 
   async onModuleInit() {
@@ -65,24 +62,25 @@ export abstract class CandleService implements OnModuleInit {
     );
     const observables = {};
     for (const granularity of this._getGranularityValues()) {
-      const date = new Date();
+      const endDate = new Date();
       const mostRecentCandle = await this._findCandleExtreme(granularity, true);
       this.logger.log(
-        `Most recent candle for ${granularity} granularity is ${mostRecentCandle === undefined ? 'None' : mostRecentCandle
+        `Most recent candle for ${granularity} granularity is ${
+          mostRecentCandle === undefined ? 'None' : mostRecentCandle
         }`,
       );
       let startDate: Date;
       if (mostRecentCandle === undefined) {
-        startDate = addSeconds(date, -1 * numCandles * granularity);
+        startDate = addSeconds(endDate, -1 * numCandles * granularity);
       } else {
         startDate = mostRecentCandle;
       }
       this.logger.log(
-        `Starting to fetch historical data for granularity ${granularity} between ${startDate} and ${date}`,
+        `Starting to fetch historical data for granularity ${granularity} between ${startDate} and ${endDate}`,
       );
       const observable = this._getHistoricDataForGranularity(
         startDate,
-        date,
+        endDate,
         granularity,
       ).pipe(
         switchMap((candles) => {
@@ -113,6 +111,11 @@ export abstract class CandleService implements OnModuleInit {
           start: start.toISOString(),
           end: tempEnd.toISOString(),
         });
+      }),
+      catchError((err) => {
+        this.logger.error(`Error fetching candles`);
+        this.logger.error(JSON.stringify(err, null, 2));
+        throw 'Error fetching candles';
       }),
       tap(() => {
         start = tempEnd;
@@ -169,14 +172,22 @@ export abstract class CandleService implements OnModuleInit {
     }));
     if (candles.length > 0) {
       this.logger.log(
-        `Attempting to write candles for ${candles[0].openTimeInISO} - ${candles[candles.length - 1].openTimeInISO
-        }`,
+        `Attempting to write ${granularity} candles for ${
+          candles[0].openTimeInISO
+        } - ${candles[candles.length - 1].openTimeInISO}`,
       );
     }
     return from(
       this.knexClient(this._getProductDbName(granularity)).insert(candleData),
     ).pipe(
       catchError((err) => {
+        const errDetails = {
+          granularity,
+          startDate: candles[0].openTimeInISO,
+          endTime: candles[candles.length - 1].openTimeInISO,
+        };
+        this.logger.error('Error trying to write to write candle.', errDetails);
+        this.logger.error(JSON.stringify(err, null, 2));
         if (this.isUniqueErr(err)) {
           return this.handleUniqueError(candles, granularity);
         }
@@ -207,7 +218,8 @@ export abstract class CandleService implements OnModuleInit {
       map((previous) => {
         if (previous.length === candles.length) {
           this.logger.log(
-            `Candles already exist between ${candles[0].openTimeInISO} and ${candles[candles.length - 1].openTimeInISO
+            `Candles already exist between ${candles[0].openTimeInISO} and ${
+              candles[candles.length - 1].openTimeInISO
             }`,
           );
           return of([] as number[]);
@@ -238,14 +250,15 @@ export abstract class CandleService implements OnModuleInit {
   private async _initTables() {
     for await (const granularity of this._getGranularityValues()) {
       const tableName: string = this._getProductDbName(granularity);
-
       if (await this.knexClient.schema.hasTable(tableName)) {
+        this.logger.log(`${tableName} exists...`);
         await this.knexClient.schema.dropTable(tableName);
+        this.logger.log(`${tableName} dropped...`);
       }
       await this.knexClient.schema.createTableLike(
         tableName,
         'candle',
-        (_t) => { },
+        (_t) => {},
       );
       this.logger.log(`${tableName} created...`);
     }
