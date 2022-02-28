@@ -1,4 +1,4 @@
-import { Logger, OnModuleInit } from '@nestjs/common';
+import { Logger, OnApplicationBootstrap, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import CoinbasePro, {
   Candle,
@@ -23,7 +23,9 @@ import {
 import { DbCandle } from './db-candle.interface';
 import { ProductSymbols } from './product-symbols.enum';
 
-export abstract class CandleService implements OnModuleInit {
+export abstract class CandleService
+  implements OnModuleInit, OnApplicationBootstrap
+{
   private readonly logger: Logger;
   product: string;
   private _numCandles: any;
@@ -41,6 +43,9 @@ export abstract class CandleService implements OnModuleInit {
 
   async onModuleInit() {
     await this._initTables();
+  }
+
+  async onApplicationBootstrap() {
     (await this._getHistoricData())
       .pipe(
         tap(() => {
@@ -196,9 +201,15 @@ export abstract class CandleService implements OnModuleInit {
       }),
     );
   }
+
   async isUniqueErr(_err: Error) {
     return true;
   }
+
+  // _getProductStartDate() {
+  //   const startString = this.configService.get('START_DATE');
+  //   const parseDate = parse(startString, 'd-M-yyyy', new Date());
+  // }
 
   handleUniqueError(
     candles: Candle[],
