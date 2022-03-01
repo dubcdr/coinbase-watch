@@ -60,10 +60,15 @@ export class CandleService {
     }
     const startDate = new Date(candles[0].openTimeInISO);
     const endDate = new Date(candles[candles.length - 1].openTimeInISO);
-
-    await this.knexClient(
-      this.productService.getProductDbName(product, granularity),
-    ).insert(candleData);
+    try {
+      await this.knexClient(
+        this.productService.getProductDbName(product, granularity),
+      ).insert(candleData);
+    } catch (error) {
+      if (this._isUniqueError(error)) {
+        await this._handleUniqueError(product, candles, granularity);
+      }
+    }
 
     const logData: IntervalLogData = {
       action: `Inserted ${candles.length}`,
@@ -73,37 +78,6 @@ export class CandleService {
       granularity,
     };
     this.logger.logProduct(logData);
-
-    // return from(
-    //   this.knexClient(
-    //     this.productService.getProductDbName(product, granularity),
-    //   ).insert(candleData),
-    // ).pipe(
-    //   catchError((err) => {
-    //     const errDetails = {
-    //       granularity,
-    //       startDate: candles[0]?.openTimeInISO,
-    //       endTime: candles[candles.length - 1]?.openTimeInISO,
-    //     };
-    //     this.logger.error('Error trying to write to write candle.', errDetails);
-    //     this.logger.error(JSON.stringify(err, null, 2));
-    //     if (this._isUniqueError(err)) {
-    //       return this._handleUniqueError(product, candles, granularity);
-    //     }
-
-    //     throw 'Unhandled write candle error: ' + err;
-    //   }),
-    //   tap(() => {
-    //     const logData: IntervalLogData = {
-    //       action: `Inserted ${candles.length}`,
-    //       start: startDate,
-    //       end: endDate,
-    //       product,
-    //       granularity,
-    //     };
-    //     this.logger.logProduct(logData);
-    //   }),
-    // );
   }
 
   public setupListeners() {
@@ -111,13 +85,13 @@ export class CandleService {
     this.client.rest.on(
       ProductEvent.NEW_CANDLE,
       (productId: string, g: CandleGranularity, candle: Candle) => {
-        // const logData: IntervalLogData = {
-        //   start: new Date(candle.openTimeInISO),
-        //   product: productId,
-        //   granularity: g,
-        //   action: 'Received candle',
-        // };
-        // this.logger.logProduct(logData);
+        const logData: IntervalLogData = {
+          start: new Date(candle.openTimeInISO),
+          product: productId,
+          granularity: g,
+          action: 'Received candle',
+        };
+        this.logger.logProduct(logData);
         this.writeCandles(productId, [candle], g);
       },
     );
@@ -148,13 +122,13 @@ export class CandleService {
     });
   }
 
-  private _handleUniqueError(
+  private async _handleUniqueError(
     product: string,
     candles: Candle[],
     granularity: CandleGranularity,
   ) {
     this.logger.log(`Handling unique error`);
-    const previousPromise = this.knexClient<DbCandle>(
+    const loadedCandles = await this.knexClient<DbCandle>(
       this.productService.getProductDbName(product, granularity),
     )
       .whereBetween('open_timestamp', [
@@ -162,41 +136,25 @@ export class CandleService {
         candles[candles.length - 1]?.openTimeInISO,
       ])
       .orderBy('open_timestamp', 'asc');
+    if (loadedCandles.length === candles.length) {
+      const logData: IntervalLogData = {
+        product,
+        granularity,
+        start: new Date(candles[0]?.openTimeInISO),
+        end: new Date(candles[candles.length - 1]?.openTimeInISO),
+        action: 'Candles already exist',
+      };
+      this.logger.logProduct(logData);
+      return of([] as number[]);
+    }
 
-    return from(previousPromise).pipe(
-      map((previous) => {
-        if (previous.length === candles.length) {
-          const logData: IntervalLogData = {
-            product,
-            granularity,
-            start: new Date(candles[0]?.openTimeInISO),
-            end: new Date(candles[candles.length - 1]?.openTimeInISO),
-            action: 'Candles already exist',
-          };
-          this.logger.logProduct(logData);
-          return of([] as number[]);
-        }
-
-        const retries = candles.filter(
-          (apiCandle) =>
-            !previous.some((dbCandle) =>
-              isEqual(
-                dbCandle.open_timestamp,
-                new Date(apiCandle.openTimeInISO),
-              ),
-            ),
-        );
-
-        return retries;
-      }),
-      switchMap((retries) => {
-        if (Array.isArray(retries)) {
-          return this.writeCandles(product, retries, granularity);
-        } else {
-          return retries;
-        }
-      }),
+    const retries = candles.filter(
+      (apiCandle) =>
+        !loadedCandles.some((dbCandle) =>
+          isEqual(dbCandle.open_timestamp, new Date(apiCandle.openTimeInISO)),
+        ),
     );
+    await this.writeCandles(product, retries, granularity);
   }
 
   private async _isUniqueError(err: Error) {
