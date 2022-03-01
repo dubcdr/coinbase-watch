@@ -1,22 +1,14 @@
-import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, OnApplicationBootstrap } from '@nestjs/common';
 import CoinbasePro, { Candle, CandleGranularity } from 'coinbase-pro-node';
-import { addDays, addSeconds, isAfter, isBefore } from 'date-fns';
-import {
-  forkJoin,
-  interval,
-  catchError,
-  Observable,
-  Subject,
-  switchMap,
-  takeUntil,
-  tap,
-} from 'rxjs';
+import { addSeconds, isBefore } from 'date-fns';
+
 import { CandleService } from 'src/candle/candle.service';
 import { IntervalLogData, LoggerService } from 'src/logger/logger.service';
 import { ProductsService } from 'src/products/products.service';
+import { pThrottle } from 'src/utils/throttle.fn';
 
 @Injectable()
-export class HistoricService implements OnModuleInit {
+export class HistoricService implements OnApplicationBootstrap {
   constructor(
     @Inject('COINBASE_CLIENT') private client: CoinbasePro,
     private productService: ProductsService,
@@ -26,22 +18,47 @@ export class HistoricService implements OnModuleInit {
     logger.setContext('Historic');
   }
 
-  async onModuleInit() {
+  async onApplicationBootstrap() {
     return new Promise((resolve, reject) => {
-      this._getHistoricData().then((subj) => {
-        subj.subscribe(() => {
-          this.logger.log('Inserted historic data...');
-          this.candleService.setupListeners();
-          resolve(true);
-        });
-      });
+      const historicDataPromise = this._getHistoricData();
+      this.logger.log('Loaded historic data');
+      resolve(true);
     });
   }
 
   private async _getHistoricData() {
-    const observables = {};
+    const throttle = pThrottle({
+      limit: 15,
+      interval: 1000,
+      strict: false,
+    });
+
+    const throttled = throttle(
+      async (
+        promise: Promise<Candle[]>,
+        {
+          product,
+          granularity,
+        }: { product: string; granularity: CandleGranularity },
+      ) => {
+        const candles = await promise;
+        if (candles.length < 301) {
+          return await this.candleService.writeCandles(
+            product,
+            candles,
+            granularity,
+          );
+        } else {
+          this.logger.error(
+            `Should never happen, trying to write more than 300 candles`,
+          );
+        }
+      },
+    );
+
     for (const product of this.productService.products) {
       for (const granularity of this.productService.getGranularityValues()) {
+        const apiPromises: Promise<Candle[]>[] = [];
         const endDate = new Date();
         const mostRecentCandleDate = await this.candleService.findCandleExtreme(
           product,
@@ -73,25 +90,21 @@ export class HistoricService implements OnModuleInit {
           startDate = mostRecentCandleDate;
         }
         this.logger.logProduct(logData);
-        const observable = this._getHistoricDataForGranularity(
-          product,
-          startDate,
-          endDate,
-          granularity,
-        ).pipe(
-          switchMap((candles) => {
-            return this.candleService.writeCandles(
-              product,
-              candles,
-              granularity,
-            );
-          }),
+        apiPromises.push(
+          ...this._getHistoricDataForGranularity(
+            product,
+            startDate,
+            endDate,
+            granularity,
+          ),
         );
-        observables[`${product}-${granularity}`] = observable;
+        for (const promise of apiPromises) {
+          const result = throttled(promise, { granularity, product });
+        }
       }
     }
 
-    return forkJoin(observables);
+    return throttled;
   }
 
   // candle granularity is in seconds
@@ -101,42 +114,43 @@ export class HistoricService implements OnModuleInit {
     start: Date,
     end: Date,
     granularity: CandleGranularity,
-  ): Observable<Candle[]> {
+  ): Promise<Candle[]>[] {
+    const promises = new Array<Promise<Candle[]>>();
     const intervalTime = 299 * granularity;
-    const finished = new Subject<void>();
-    let tempEnd = addSeconds(start, intervalTime);
-    return interval(this._getFetchInterval()).pipe(
-      takeUntil(finished),
-      switchMap(() => {
-        return this.client.rest.product.getCandles(product, {
-          granularity,
-          start: start.toISOString(),
-          end: tempEnd.toISOString(),
-        });
-      }),
-      catchError((err) => {
-        this.logger.error(`Error fetching candles`);
-        this.logger.error(JSON.stringify(err, null, 2));
-        throw 'Error fetching candles';
-      }),
-      tap(() => {
-        start = addDays(addSeconds(start, intervalTime), 1);
-        tempEnd = addSeconds(start, intervalTime);
+    const secondsBetween = Math.floor((end.getTime() - start.getTime()) / 1000);
+    const fullPulls = Math.floor(secondsBetween / intervalTime);
 
-        if (isAfter(start, end)) {
-          finished.next();
-          finished.complete();
-        }
+    for (let i = 0; i < fullPulls; i++) {
+      const tempEnd = addSeconds(end, -1 * i * intervalTime);
+      const tempStart = addSeconds(end, (-1 * i - 1) * intervalTime);
+      promises.push(
+        this.client.rest.product.getCandles(product, {
+          granularity,
+          start: tempStart.toISOString(),
+          end: tempEnd.toISOString(),
+        }),
+      );
+    }
+
+    const remaining = Math.floor((secondsBetween % intervalTime) / granularity);
+    this.logger.logProduct({
+      granularity,
+      product,
+      action: `Seconds between\t${secondsBetween}\tFull Pulls ${fullPulls}\tRemaining ${remaining}`,
+    });
+    // this.logger.logProduct({
+    //   granularity,
+    //   product,
+    //   action: `Remaining Candles ${remaining}`,
+    // });
+    promises.push(
+      this.client.rest.product.getCandles(product, {
+        granularity,
+        start: start.toISOString(),
+        end: addSeconds(start, remaining * granularity).toISOString(),
       }),
     );
-  }
 
-  private _getFetchInterval(): number {
-    const products = this.productService.products.size;
-    const granularities = this.productService.getGranularityValues().length;
-    const channels = products * granularities;
-    const rate = channels / 15;
-
-    return rate * 1000;
+    return promises;
   }
 }
