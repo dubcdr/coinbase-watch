@@ -76,7 +76,7 @@ export class HistoricService implements OnModuleInit {
             );
           }),
         );
-        observables[`${granularity}`] = observable;
+        observables[`${product}-${granularity}`] = observable;
       }
     }
 
