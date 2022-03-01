@@ -41,11 +41,11 @@ export class CandleService {
     return latestCandle[0].open_timestamp;
   }
 
-  public writeCandles(
+  public async writeCandles(
     product: string,
     candles: Candle[],
     granularity: CandleGranularity,
-  ): Observable<number[]> {
+  ): Promise<Record<string, any>> {
     const candleData = candles.map((candle) => ({
       open_timestamp: candle.openTimeInISO,
       high: candle.high,
@@ -61,36 +61,49 @@ export class CandleService {
     const startDate = new Date(candles[0].openTimeInISO);
     const endDate = new Date(candles[candles.length - 1].openTimeInISO);
 
-    return from(
-      this.knexClient(
-        this.productService.getProductDbName(product, granularity),
-      ).insert(candleData),
-    ).pipe(
-      catchError((err) => {
-        const errDetails = {
-          granularity,
-          startDate: candles[0]?.openTimeInISO,
-          endTime: candles[candles.length - 1]?.openTimeInISO,
-        };
-        this.logger.error('Error trying to write to write candle.', errDetails);
-        this.logger.error(JSON.stringify(err, null, 2));
-        if (this._isUniqueError(err)) {
-          return this._handleUniqueError(product, candles, granularity);
-        }
+    await this.knexClient(
+      this.productService.getProductDbName(product, granularity),
+    ).insert(candleData);
 
-        throw 'Unhandled write candle error: ' + err;
-      }),
-      tap(() => {
-        const logData: IntervalLogData = {
-          action: `Inserted ${candles.length}`,
-          start: startDate,
-          end: endDate,
-          product,
-          granularity,
-        };
-        this.logger.logProduct(logData);
-      }),
-    );
+    const logData: IntervalLogData = {
+      action: `Inserted ${candles.length}`,
+      start: startDate,
+      end: endDate,
+      product,
+      granularity,
+    };
+    this.logger.logProduct(logData);
+
+    // return from(
+    //   this.knexClient(
+    //     this.productService.getProductDbName(product, granularity),
+    //   ).insert(candleData),
+    // ).pipe(
+    //   catchError((err) => {
+    //     const errDetails = {
+    //       granularity,
+    //       startDate: candles[0]?.openTimeInISO,
+    //       endTime: candles[candles.length - 1]?.openTimeInISO,
+    //     };
+    //     this.logger.error('Error trying to write to write candle.', errDetails);
+    //     this.logger.error(JSON.stringify(err, null, 2));
+    //     if (this._isUniqueError(err)) {
+    //       return this._handleUniqueError(product, candles, granularity);
+    //     }
+
+    //     throw 'Unhandled write candle error: ' + err;
+    //   }),
+    //   tap(() => {
+    //     const logData: IntervalLogData = {
+    //       action: `Inserted ${candles.length}`,
+    //       start: startDate,
+    //       end: endDate,
+    //       product,
+    //       granularity,
+    //     };
+    //     this.logger.logProduct(logData);
+    //   }),
+    // );
   }
 
   public setupListeners() {
@@ -105,7 +118,7 @@ export class CandleService {
         //   action: 'Received candle',
         // };
         // this.logger.logProduct(logData);
-        this.writeCandles(productId, [candle], g).subscribe();
+        this.writeCandles(productId, [candle], g);
       },
     );
 
@@ -139,7 +152,7 @@ export class CandleService {
     product: string,
     candles: Candle[],
     granularity: CandleGranularity,
-  ): Observable<number[]> {
+  ) {
     this.logger.log(`Handling unique error`);
     const previousPromise = this.knexClient<DbCandle>(
       this.productService.getProductDbName(product, granularity),
