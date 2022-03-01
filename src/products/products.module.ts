@@ -6,5 +6,6 @@ import { ProductsService } from './products.service';
 @Module({
   imports: [CoinbaseModule, KnexModule],
   providers: [ProductsService],
+  exports: [ProductsService],
 })
-export class ProductsModule { }
+export class ProductsModule {}

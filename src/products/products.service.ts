@@ -1,19 +1,17 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import CoinbasePro, { Candle, CandleGranularity } from 'coinbase-pro-node';
-import {
-  isSameDay,
-  format,
-  parse,
-  addDays,
-  isWithinInterval,
-  differenceInDays,
-} from 'date-fns';
+import { format, parse, addDays, differenceInDays } from 'date-fns';
 import { Knex } from 'knex';
 
 // Load products of interest
 // Check if info initialized
 //  find product start date
+export interface ProductRow {
+  id: number;
+  start_date: Date;
+  product_name: string;
+}
 
 @Injectable()
 export class ProductsService implements OnModuleInit {
@@ -23,7 +21,7 @@ export class ProductsService implements OnModuleInit {
     @Inject('COINBASE_CLIENT') protected client: CoinbasePro,
     @Inject('KNEX_CLIENT') protected knexClient: Knex,
     protected configService: ConfigService,
-  ) { }
+  ) {}
 
   async onModuleInit() {
     await this._initTable();
@@ -43,33 +41,36 @@ export class ProductsService implements OnModuleInit {
     await this._initializeProducts(uninitializedProducts);
   }
 
-  // private async _initTable() {
-  //   const hasTable = await this.knexClient.schema.hasTable(this.TABLE_NAME);
-  //   this.logger.log(`${this.TABLE_NAME} table exists?: ${hasTable}`);
-  //   if (!hasTable) {
-  //     await this.knexClient.schema.createTable(this.TABLE_NAME, (table) => {
-  //       table.increments();
-  //       table.string('product_name', 20);
-  //       table.date('start_date');
-  //     });
-  //     this.logger.log(`${this.TABLE_NAME} table created...`);
-  //   } else {
-  //     this.logger.log(`${this.TABLE_NAME} table exists...`);
-  //   }
-  // }
+  async getProductStartDate(product: string) {
+    let rows = await this._getProductStartDate(product);
+    if (rows.length === 0) {
+      await this._initializeProducts([product]);
+      rows = await this._getProductStartDate(product);
+    }
+    return rows[0].start_date;
+  }
+
+  async _getProductStartDate(product: string): Promise<ProductRow[]> {
+    return await this.knexClient<ProductRow>(this.TABLE_NAME).where(
+      'product_name',
+      '=',
+      product,
+    );
+  }
 
   private async _initTable() {
     const hasTable = await this.knexClient.schema.hasTable(this.TABLE_NAME);
     this.logger.log(`${this.TABLE_NAME} table exists?: ${hasTable}`);
-    if (hasTable) {
-      await this.knexClient.schema.dropTable(this.TABLE_NAME);
+    if (!hasTable) {
+      await this.knexClient.schema.createTable(this.TABLE_NAME, (table) => {
+        table.increments();
+        table.string('product_name', 20);
+        table.date('start_date');
+      });
+      this.logger.log(`${this.TABLE_NAME} table created...`);
+    } else {
+      this.logger.log(`${this.TABLE_NAME} table exists...`);
     }
-    await this.knexClient.schema.createTable(this.TABLE_NAME, (table) => {
-      table.increments();
-      table.string('product_name', 20);
-      table.date('start_date');
-    });
-    this.logger.log(`${this.TABLE_NAME} table created...`);
   }
 
   private async _getUninitializedProducts(
@@ -91,15 +92,15 @@ export class ProductsService implements OnModuleInit {
 
   private async _initializeProducts(products: string[]) {
     for await (const product of products) {
-      const startDate: Date = await this._getProductStartDate(product);
+      const startDate: Date = await this._findProductStartDate(product);
       await this.knexClient(this.TABLE_NAME).insert({
         product_name: product,
-        start_date: startDate,
+        start_date: addDays(startDate, 1),
       });
     }
   }
 
-  private async _getProductStartDate(product: string): Promise<Date> {
+  private async _findProductStartDate(product: string): Promise<Date> {
     let leftDate = this._getStartDate();
     let rightDate = new Date();
     let leftDateCandles: Candle[];
