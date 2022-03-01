@@ -7,6 +7,7 @@ import { CoinbaseModule } from './coinbase/coinbase.module';
 import { KnexModule } from './knex/knex.module';
 import { HistoricModule } from './historic/historic.module';
 import { CandleModule } from './candle/candle.module';
+import { LoggerModule } from './logger/logger.module';
 
 export const KNEX_CLIENT = 'KNEX_CLIENT';
 
@@ -15,11 +16,12 @@ export const KNEX_CLIENT = 'KNEX_CLIENT';
     ConfigModule.forRoot({
       isGlobal: true,
     }),
+    LoggerModule,
     CoinbaseModule,
     KnexModule,
     ProductsModule,
-    HistoricModule,
     CandleModule,
+    HistoricModule,
   ],
   controllers: [AppController],
   providers: [AppService],

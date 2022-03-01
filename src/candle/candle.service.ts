@@ -1,25 +1,26 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import CoinbasePro, {
   Candle,
   CandleGranularity,
   ProductEvent,
 } from 'coinbase-pro-node';
-import { format, isEqual } from 'date-fns';
+import { isEqual } from 'date-fns';
 import { Knex } from 'knex';
 import { from, Observable, map, of, switchMap, tap, catchError } from 'rxjs';
 import { DbCandle } from 'src/db-candle.interface';
+import { IntervalLogData, LoggerService } from 'src/logger/logger.service';
 import { ProductsService } from 'src/products/products.service';
-import { formatDateForLog } from 'src/utils/format-date.fn';
 
 @Injectable()
 export class CandleService {
-  private readonly logger: Logger = new Logger();
-
   constructor(
     @Inject('COINBASE_CLIENT') private client: CoinbasePro,
     @Inject('KNEX_CLIENT') private knexClient: Knex,
     private productService: ProductsService,
-  ) {}
+    private logger: LoggerService,
+  ) {
+    logger.setContext('Candle');
+  }
 
   public async findCandleExtreme(
     product: string,
@@ -80,11 +81,14 @@ export class CandleService {
         throw 'Unhandled write candle error: ' + err;
       }),
       tap(() => {
-        this.logger.log(
-          `${granularity} candles for ${formatDateForLog(
-            startDate,
-          )} - ${formatDateForLog(endDate)}`,
-        );
+        const logData: IntervalLogData = {
+          action: `Inserted ${candles.length}`,
+          start: startDate,
+          end: endDate,
+          product,
+          granularity,
+        };
+        this.logger.logProduct(logData);
       }),
     );
   }
@@ -94,16 +98,25 @@ export class CandleService {
     this.client.rest.on(
       ProductEvent.NEW_CANDLE,
       (productId: string, g: CandleGranularity, candle: Candle) => {
-        this.logger.log('Recent candle', productId, g, candle.openTimeInISO);
+        // const logData: IntervalLogData = {
+        //   start: new Date(candle.openTimeInISO),
+        //   product: productId,
+        //   granularity: g,
+        //   action: 'Received candle',
+        // };
+        // this.logger.logProduct(logData);
         this.writeCandles(productId, [candle], g).subscribe();
       },
     );
 
     for (const product of this.productService.products) {
       for (const granularity of this.productService.getGranularityValues()) {
-        this.logger.log(
-          `Initilizing listener for ${granularity} granularity...`,
-        );
+        const logData: IntervalLogData = {
+          granularity,
+          product,
+          action: 'Initializing listener',
+        };
+        this.logger.logProduct(logData);
         this._setupListen(product, granularity);
       }
     }
@@ -140,11 +153,14 @@ export class CandleService {
     return from(previousPromise).pipe(
       map((previous) => {
         if (previous.length === candles.length) {
-          this.logger.log(
-            `Candles already exist between ${candles[0]?.openTimeInISO} and ${
-              candles[candles.length - 1]?.openTimeInISO
-            }`,
-          );
+          const logData: IntervalLogData = {
+            product,
+            granularity,
+            start: new Date(candles[0]?.openTimeInISO),
+            end: new Date(candles[candles.length - 1]?.openTimeInISO),
+            action: 'Candles already exist',
+          };
+          this.logger.logProduct(logData);
           return of([] as number[]);
         }
 
@@ -170,7 +186,7 @@ export class CandleService {
     );
   }
 
-  private async _isUniqueError(_err: Error) {
-    return true;
+  private async _isUniqueError(err: Error) {
+    return err.message.includes('exits');
   }
 }
