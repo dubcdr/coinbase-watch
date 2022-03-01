@@ -1,9 +1,9 @@
-import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import CoinbasePro, { Candle, CandleGranularity } from 'coinbase-pro-node';
-import { format, parse, addDays, differenceInDays } from 'date-fns';
+import { parse, addDays, differenceInDays } from 'date-fns';
 import { Knex } from 'knex';
-import { formatDateForLog } from 'src/utils/format-date.fn';
+import { IntervalLogData, LoggerService } from 'src/logger/logger.service';
 
 // Load products of interest
 // Check if info initialized
@@ -17,7 +17,6 @@ export interface ProductRow {
 @Injectable()
 export class ProductsService implements OnModuleInit {
   private readonly TABLE_NAME = 'PRODUCTS';
-  private logger = new Logger();
   private _products: Set<string>;
 
   public get products(): Set<string> {
@@ -25,10 +24,13 @@ export class ProductsService implements OnModuleInit {
   }
 
   constructor(
-    @Inject('COINBASE_CLIENT') protected client: CoinbasePro,
-    @Inject('KNEX_CLIENT') protected knexClient: Knex,
-    protected configService: ConfigService,
-  ) { }
+    @Inject('COINBASE_CLIENT') private client: CoinbasePro,
+    @Inject('KNEX_CLIENT') private knexClient: Knex,
+    private configService: ConfigService,
+    private logger: LoggerService,
+  ) {
+    logger.setContext('Product');
+  }
 
   async onModuleInit() {
     const productStrings = this.configService.get('PRODUCTS');
@@ -37,10 +39,9 @@ export class ProductsService implements OnModuleInit {
     await this._initTable();
     await this._initCandleTables();
 
-    this.logger.log(`Products desired...`);
-    for (const product of this.products) {
-      this.logger.log(product);
-    }
+    this.logger.log(
+      `Products desired: ${Array.from(this.products.values()).join(', ')}`,
+    );
     const uninitializedProducts = await this._getUninitializedProducts(
       this.products,
     );
@@ -82,16 +83,13 @@ export class ProductsService implements OnModuleInit {
 
   private async _initTable() {
     const hasTable = await this.knexClient.schema.hasTable(this.TABLE_NAME);
-    this.logger.log(`${this.TABLE_NAME} table exists?: ${hasTable}`);
+    // this.logger.log(`${this.TABLE_NAME} table exists?: ${hasTable}`);
     if (!hasTable) {
       await this.knexClient.schema.createTable(this.TABLE_NAME, (table) => {
         table.increments();
         table.string('product_name', 20);
         table.date('start_date');
       });
-      this.logger.log(`${this.TABLE_NAME} table created...`);
-    } else {
-      this.logger.log(`${this.TABLE_NAME} table exists...`);
     }
   }
 
@@ -102,17 +100,29 @@ export class ProductsService implements OnModuleInit {
         if (await this.knexClient.schema.hasTable(tableName)) {
           this.logger.log(`${tableName} exists...`);
           await this.knexClient.schema.dropTable(tableName);
-          this.logger.log(`${tableName} dropped...`);
         }
-        await this.knexClient.schema.createTableLike(
-          tableName,
-          'candle',
-          (_t) => { },
-        );
+        await this.knexClient.schema.createTableLike(tableName, 'candle', null);
         this.logger.log(`${tableName} created...`);
       }
     }
   }
+  // private async _initCandleTables() {
+  //   for (const product of this.products) {
+  //     for await (const granularity of this.getGranularityValues()) {
+  //       const tableName: string = this.getProductDbName(product, granularity);
+  //       if (await this.knexClient.schema.hasTable(tableName)) {
+  //         this.logger.log(`${tableName} exists...`);
+  //       } else {
+  //         await this.knexClient.schema.createTableLike(
+  //           tableName,
+  //           'candle',
+  //           null,
+  //         );
+  //         this.logger.log(`${tableName} created...`);
+  //       }
+  //     }
+  //   }
+  // }
 
   private async _getUninitializedProducts(
     products: Set<string>,
@@ -142,9 +152,10 @@ export class ProductsService implements OnModuleInit {
   }
 
   private async _findProductStartDate(product: string): Promise<Date> {
-    let leftDate = this._getStartDate();
+    let leftDate = this.getEnvStartDate();
     let rightDate = new Date();
     let leftDateCandles: Candle[];
+    const granularity = CandleGranularity.ONE_DAY;
     try {
       leftDateCandles = await this.client.rest.product.getCandles(product, {
         start: leftDate.toISOString(),
@@ -154,8 +165,14 @@ export class ProductsService implements OnModuleInit {
     } catch (error) {
       leftDateCandles = [];
     }
+    const logData: IntervalLogData = {
+      start: leftDate,
+      granularity,
+      product,
+      action: `Historic start date`,
+    };
     if (leftDateCandles.length > 0) {
-      this.logger.log(`${product} start date: ${formatDateForLog(leftDate)}`);
+      this.logger.logProduct(logData);
       return new Date(leftDateCandles[0].openTimeInISO);
     }
     while (differenceInDays(rightDate, leftDate) !== 1) {
@@ -165,7 +182,8 @@ export class ProductsService implements OnModuleInit {
         rightDate,
       );
     }
-    this.logger.log(`${product} start date: ${formatDateForLog(leftDate)}`);
+    logData.start = leftDate;
+    this.logger.logProduct(logData);
     return rightDate;
   }
 
@@ -178,14 +196,19 @@ export class ProductsService implements OnModuleInit {
     const midpoint = new Date(midpointMillis);
     let midpointCandles: Candle[];
 
-    this.logger.log(
-      `Binomial search between ${formatDateForLog(
-        leftDate,
-      )} - ${formatDateForLog(rightDate)}: ${differenceInDays(
+    const granularity = CandleGranularity.ONE_DAY;
+    const logData: IntervalLogData = {
+      product,
+      granularity,
+      start: leftDate,
+      end: rightDate,
+      action: `Binomial Search (${differenceInDays(
         rightDate,
         leftDate,
-      )} days apart`,
-    );
+      )} days between)`,
+    };
+
+    this.logger.log(logData);
 
     try {
       midpointCandles = await this.client.rest.product.getCandles(product, {
@@ -204,7 +227,7 @@ export class ProductsService implements OnModuleInit {
     }
   }
 
-  private _getStartDate(): Date {
+  public getEnvStartDate(): Date {
     const startString = this.configService.get('START_DATE');
     const parsedDate = parse(startString, 'd-M-yyyy', new Date());
     return parsedDate;

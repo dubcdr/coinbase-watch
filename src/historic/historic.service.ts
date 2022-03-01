@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import CoinbasePro, { Candle, CandleGranularity } from 'coinbase-pro-node';
-import { addDays, addSeconds } from 'date-fns';
+import { addDays, addSeconds, isAfter, isBefore } from 'date-fns';
 import {
   forkJoin,
   interval,
@@ -12,17 +12,19 @@ import {
   tap,
 } from 'rxjs';
 import { CandleService } from 'src/candle/candle.service';
+import { IntervalLogData, LoggerService } from 'src/logger/logger.service';
 import { ProductsService } from 'src/products/products.service';
-import { formatDateForLog } from 'src/utils/format-date.fn';
 
 @Injectable()
 export class HistoricService implements OnModuleInit {
-  private logger = new Logger('Historic');
   constructor(
     @Inject('COINBASE_CLIENT') private client: CoinbasePro,
     private productService: ProductsService,
     private candleService: CandleService,
-  ) {}
+    private logger: LoggerService,
+  ) {
+    logger.setContext('Historic');
+  }
 
   async onModuleInit() {
     return new Promise((resolve, reject) => {
@@ -41,29 +43,38 @@ export class HistoricService implements OnModuleInit {
     for (const product of this.productService.products) {
       for (const granularity of this.productService.getGranularityValues()) {
         const endDate = new Date();
-        const mostRecentCandle = await this.candleService.findCandleExtreme(
+        const mostRecentCandleDate = await this.candleService.findCandleExtreme(
           product,
           granularity,
           true,
         );
-        this.logger.log(
-          `Most recent candle for ${granularity} granularity is ${
-            mostRecentCandle === undefined ? 'None' : mostRecentCandle
-          }`,
-        );
         let startDate: Date;
-        if (mostRecentCandle === undefined) {
-          startDate = await this.productService.getProductStartDate(product);
-          // startDate = addSeconds(endDate, -1 * numCandles * granularity);
+        let logData: IntervalLogData;
+        if (mostRecentCandleDate === undefined) {
+          const envStartDate = this.productService.getEnvStartDate();
+          startDate = isBefore(mostRecentCandleDate, envStartDate)
+            ? mostRecentCandleDate
+            : envStartDate;
+          logData = {
+            start: startDate,
+            end: endDate,
+            product,
+            granularity,
+            action: 'Load Between',
+          };
         } else {
-          startDate = mostRecentCandle;
+          logData = {
+            start: mostRecentCandleDate,
+            action: `Catching up`,
+            product,
+            granularity,
+          };
+          this.logger.logProduct(logData);
+          startDate = mostRecentCandleDate;
         }
-        this.logger.log(
-          `Starting to fetch historical data for granularity ${granularity} between ${formatDateForLog(
-            startDate,
-          )} and ${formatDateForLog(endDate)}`,
-        );
+        this.logger.logProduct(logData);
         const observable = this._getHistoricDataForGranularity(
+          product,
           startDate,
           endDate,
           granularity,
@@ -76,7 +87,7 @@ export class HistoricService implements OnModuleInit {
             );
           }),
         );
-        observables[`${granularity}`] = observable;
+        observables[`${product}-${granularity}`] = observable;
       }
     }
 
@@ -86,6 +97,7 @@ export class HistoricService implements OnModuleInit {
   // candle granularity is in seconds
   // can fetch 300 candles in one api call
   private _getHistoricDataForGranularity(
+    product: string,
     start: Date,
     end: Date,
     granularity: CandleGranularity,
@@ -93,11 +105,10 @@ export class HistoricService implements OnModuleInit {
     const intervalTime = 299 * granularity;
     const finished = new Subject<void>();
     let tempEnd = addSeconds(start, intervalTime);
-    this.logger.log(`Fetch interval ${this._getFetchInterval()}`);
     return interval(this._getFetchInterval()).pipe(
       takeUntil(finished),
       switchMap(() => {
-        return this.client.rest.product.getCandles('ETH-USD', {
+        return this.client.rest.product.getCandles(product, {
           granularity,
           start: start.toISOString(),
           end: tempEnd.toISOString(),
@@ -112,7 +123,7 @@ export class HistoricService implements OnModuleInit {
         start = addDays(addSeconds(start, intervalTime), 1);
         tempEnd = addSeconds(start, intervalTime);
 
-        if (start > end) {
+        if (isAfter(start, end)) {
           finished.next();
           finished.complete();
         }
