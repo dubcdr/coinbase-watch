@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import CoinbasePro, { Candle, CandleGranularity } from 'coinbase-pro-node';
 import { format, parse, addDays, differenceInDays } from 'date-fns';
 import { Knex } from 'knex';
+import { formatDateForLog } from 'src/utils/format-date.fn';
 
 // Load products of interest
 // Check if info initialized
@@ -17,27 +18,32 @@ export interface ProductRow {
 export class ProductsService implements OnModuleInit {
   private readonly TABLE_NAME = 'PRODUCTS';
   private logger = new Logger();
+  private _products: Set<string>;
+
+  public get products(): Set<string> {
+    return new Set<string>(this._products);
+  }
+
   constructor(
     @Inject('COINBASE_CLIENT') protected client: CoinbasePro,
     @Inject('KNEX_CLIENT') protected knexClient: Knex,
     protected configService: ConfigService,
-  ) {}
+  ) { }
 
   async onModuleInit() {
+    const productStrings = this.configService.get('PRODUCTS');
+    this._products = new Set<string>(productStrings.split(','));
+
     await this._initTable();
-    const productString = this.configService.get('PRODUCTS');
-    const products = productString.split(',');
+    await this._initCandleTables();
+
     this.logger.log(`Products desired...`);
-    for (const product of products) {
+    for (const product of this.products) {
       this.logger.log(product);
     }
     const uninitializedProducts = await this._getUninitializedProducts(
-      products,
+      this.products,
     );
-    this.logger.log(`Products to initialize...`);
-    for (const product of products) {
-      this.logger.log(product);
-    }
     await this._initializeProducts(uninitializedProducts);
   }
 
@@ -48,6 +54,22 @@ export class ProductsService implements OnModuleInit {
       rows = await this._getProductStartDate(product);
     }
     return rows[0].start_date;
+  }
+
+  public getGranularityValues(): number[] {
+    return Object.keys(CandleGranularity)
+      .map((g) => parseInt(g))
+      .filter((g) => !isNaN(g));
+  }
+
+  public getProductDbName(
+    product: string,
+    granularity: CandleGranularity,
+  ): string {
+    let str = product.toLowerCase();
+    str = str.replace('-', '_');
+    str = `candle_${str}_${granularity}`;
+    return str;
   }
 
   async _getProductStartDate(product: string): Promise<ProductRow[]> {
@@ -73,8 +95,27 @@ export class ProductsService implements OnModuleInit {
     }
   }
 
+  private async _initCandleTables() {
+    for (const product of this.products) {
+      for await (const granularity of this.getGranularityValues()) {
+        const tableName: string = this.getProductDbName(product, granularity);
+        if (await this.knexClient.schema.hasTable(tableName)) {
+          this.logger.log(`${tableName} exists...`);
+          await this.knexClient.schema.dropTable(tableName);
+          this.logger.log(`${tableName} dropped...`);
+        }
+        await this.knexClient.schema.createTableLike(
+          tableName,
+          'candle',
+          (_t) => { },
+        );
+        this.logger.log(`${tableName} created...`);
+      }
+    }
+  }
+
   private async _getUninitializedProducts(
-    products: string[],
+    products: Set<string>,
   ): Promise<string[]> {
     const uninitialized = new Array<string>();
     for await (const product of products) {
@@ -114,7 +155,7 @@ export class ProductsService implements OnModuleInit {
       leftDateCandles = [];
     }
     if (leftDateCandles.length > 0) {
-      this.logger.log(`${product} start date: ${this._formatDate(leftDate)}`);
+      this.logger.log(`${product} start date: ${formatDateForLog(leftDate)}`);
       return new Date(leftDateCandles[0].openTimeInISO);
     }
     while (differenceInDays(rightDate, leftDate) !== 1) {
@@ -124,7 +165,7 @@ export class ProductsService implements OnModuleInit {
         rightDate,
       );
     }
-    this.logger.log(`${product} start date: ${this._formatDate(leftDate)}`);
+    this.logger.log(`${product} start date: ${formatDateForLog(leftDate)}`);
     return rightDate;
   }
 
@@ -138,9 +179,9 @@ export class ProductsService implements OnModuleInit {
     let midpointCandles: Candle[];
 
     this.logger.log(
-      `Binomial search between ${this._formatDate(
+      `Binomial search between ${formatDateForLog(
         leftDate,
-      )} - ${this._formatDate(rightDate)}: ${differenceInDays(
+      )} - ${formatDateForLog(rightDate)}: ${differenceInDays(
         rightDate,
         leftDate,
       )} days apart`,
@@ -167,9 +208,5 @@ export class ProductsService implements OnModuleInit {
     const startString = this.configService.get('START_DATE');
     const parsedDate = parse(startString, 'd-M-yyyy', new Date());
     return parsedDate;
-  }
-
-  private _formatDate(date: Date): string {
-    return format(date, 'd-M-yyyy');
   }
 }
