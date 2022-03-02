@@ -91,13 +91,15 @@ export class HistoricService implements OnModuleInit {
         return forkJoin(calls);
       }),
       tap(({ candles, params }) => {
-        this.logger.logProduct({
-          action: `Received Candles (${candles.length})`,
-          product: params.product,
-          granularity: params.granularity,
-          start: new Date(candles[0].openTimeInISO),
-          end: new Date(candles[candles.length - 1].openTimeInISO),
-        });
+        if (candles.length > 0) {
+          this.logger.logProduct({
+            action: `Received Candles (${candles.length})`,
+            product: params.product,
+            granularity: params.granularity,
+            start: new Date(candles[0].openTimeInISO),
+            end: new Date(candles[candles.length - 1].openTimeInISO),
+          });
+        }
       }),
       switchMap((resp) => {
         return this.candleService.writeCandles(

@@ -99,30 +99,17 @@ export class ProductsService implements OnModuleInit {
         const tableName: string = this.getProductDbName(product, granularity);
         if (await this.knexClient.schema.hasTable(tableName)) {
           this.logger.log(`${tableName} exists...`);
-          await this.knexClient.schema.dropTable(tableName);
+        } else {
+          await this.knexClient.schema.createTableLike(
+            tableName,
+            'candle',
+            null,
+          );
+          this.logger.log(`${tableName} created...`);
         }
-        await this.knexClient.schema.createTableLike(tableName, 'candle', null);
-        this.logger.log(`${tableName} created...`);
       }
     }
   }
-  // private async _initCandleTables() {
-  //   for (const product of this.products) {
-  //     for await (const granularity of this.getGranularityValues()) {
-  //       const tableName: string = this.getProductDbName(product, granularity);
-  //       if (await this.knexClient.schema.hasTable(tableName)) {
-  //         this.logger.log(`${tableName} exists...`);
-  //       } else {
-  //         await this.knexClient.schema.createTableLike(
-  //           tableName,
-  //           'candle',
-  //           null,
-  //         );
-  //         this.logger.log(`${tableName} created...`);
-  //       }
-  //     }
-  //   }
-  // }
 
   private async _getUninitializedProducts(
     products: Set<string>,
