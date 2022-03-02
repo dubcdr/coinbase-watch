@@ -98,13 +98,13 @@ export class CandleService {
     this.client.rest.on(
       ProductEvent.NEW_CANDLE,
       (productId: string, g: CandleGranularity, candle: Candle) => {
-        // const logData: IntervalLogData = {
-        //   start: new Date(candle.openTimeInISO),
-        //   product: productId,
-        //   granularity: g,
-        //   action: 'Received candle',
-        // };
-        // this.logger.logProduct(logData);
+        const logData: IntervalLogData = {
+          start: new Date(candle.openTimeInISO),
+          product: productId,
+          granularity: g,
+          action: 'Received candle',
+        };
+        this.logger.logProduct(logData);
         this.writeCandles(productId, [candle], g).subscribe();
       },
     );
@@ -173,6 +173,8 @@ export class CandleService {
               ),
             ),
         );
+
+        this.logger.error(`There are ${retries.length} retries`);
 
         return retries;
       }),
