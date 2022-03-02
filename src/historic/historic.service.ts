@@ -1,12 +1,10 @@
 import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
-import CoinbasePro, { Candle, CandleGranularity } from 'coinbase-pro-node';
-import { addMinutes, addSeconds, isBefore } from 'date-fns';
+import CoinbasePro, { CandleGranularity } from 'coinbase-pro-node';
+import { addSeconds, isBefore } from 'date-fns';
 import {
   Observable,
-  take,
   from,
   of,
-  mergeAll,
   interval,
   takeWhile,
   switchMap,
@@ -28,18 +26,18 @@ export interface CandleApiParams {
 
 @Injectable()
 export class HistoricService implements OnModuleInit {
-  private readonly MAX_CALLS_PER_SECOND: number = 10;
+  private readonly FETCH_INTERVAL = 110;
   constructor(
     @Inject('COINBASE_CLIENT') private client: CoinbasePro,
     private productService: ProductsService,
     private candleService: CandleService,
     private logger: LoggerService,
   ) {
-    logger.setContext('Historic');
+    logger.setContext('Historic'.slice(0, 6));
   }
 
   async onModuleInit() {
-    const map = await this._getHistoricDataObservables();
+    const map = await this._getHistoricDataParamMap();
     const initialCallParams: CandleApiParams[] = [];
     const subsequentCalls: CandleApiParams[] = [];
     for (const key of map.keys()) {
@@ -51,20 +49,13 @@ export class HistoricService implements OnModuleInit {
       subsequentCalls.push(...promises);
     }
 
-    return new Promise((res, rej) => {
+    return new Promise((res) => {
       this.paramsToObservable(initialCallParams)
         .pipe(
-          switchMap((resp) => {
-            return this.candleService.writeCandles(
-              resp.params.product,
-              resp.candles,
-              resp.params.granularity,
-            );
-          }),
           finalize(() => {
+            this.candleService.setupListeners();
             this.logger.log(`Finished fetching initial historical`);
             this._fetchRemainingCandles(subsequentCalls);
-            this.candleService.setupListeners();
             res(true);
           }),
         )
@@ -75,13 +66,6 @@ export class HistoricService implements OnModuleInit {
   private _fetchRemainingCandles(params: CandleApiParams[]) {
     this.paramsToObservable(params)
       .pipe(
-        switchMap((resp) => {
-          return this.candleService.writeCandles(
-            resp.params.product,
-            resp.candles,
-            resp.params.granularity,
-          );
-        }),
         finalize(() => {
           this.logger.log('Finished fetching historical');
         }),
@@ -90,7 +74,7 @@ export class HistoricService implements OnModuleInit {
   }
 
   private paramsToObservable(params: CandleApiParams[]): Observable<any> {
-    return interval(100).pipe(
+    return interval(this.FETCH_INTERVAL).pipe(
       takeWhile(() => params.length > 0),
       mergeMap(() => {
         const [param] = params.splice(0, 1);
@@ -106,15 +90,26 @@ export class HistoricService implements OnModuleInit {
         };
         return forkJoin(calls);
       }),
-      // tap(({ candles, params }) => {
-      //   this.logger.log(
-      //     `Received api resp length ${candles.length}, for ${params.product} - ${params.granularity}`,
-      //   );
-      // }),
+      tap(({ candles, params }) => {
+        this.logger.logProduct({
+          action: `Received Candles (${candles.length})`,
+          product: params.product,
+          granularity: params.granularity,
+          start: new Date(candles[0].openTimeInISO),
+          end: new Date(candles[candles.length - 1].openTimeInISO),
+        });
+      }),
+      switchMap((resp) => {
+        return this.candleService.writeCandles(
+          resp.params.product,
+          resp.candles,
+          resp.params.granularity,
+        );
+      }),
     );
   }
 
-  private async _getHistoricDataObservables(): Promise<
+  private async _getHistoricDataParamMap(): Promise<
     Map<string, CandleApiParams[]>
   > {
     const promisesMap = new Map<string, CandleApiParams[]>();
@@ -150,7 +145,7 @@ export class HistoricService implements OnModuleInit {
           startDate = mostRecentCandleDate;
         }
         this.logger.logProduct(logData);
-        const promise = this._buildProductGranularityParams(
+        const promise = this.buildProductGranularityParams(
           product,
           granularity,
           startDate,
@@ -164,14 +159,14 @@ export class HistoricService implements OnModuleInit {
 
   // candle granularity is in seconds
   // can fetch 300 candles in one api call
-  private _buildProductGranularityParams(
+  buildProductGranularityParams(
     product: string,
     granularity: CandleGranularity,
     start: Date,
     end: Date,
   ): CandleApiParams[] {
     const params = new Array<CandleApiParams>();
-    const intervalTime = 299 * granularity;
+    const intervalTime = 300 * granularity;
     const secondsBetween = Math.floor((end.getTime() - start.getTime()) / 1000);
     const fullPulls = Math.floor(secondsBetween / intervalTime);
 
@@ -201,14 +196,5 @@ export class HistoricService implements OnModuleInit {
     });
 
     return params;
-  }
-
-  private _getFetchInterval(): number {
-    const products = this.productService.products.size;
-    const granularities = this.productService.getGranularityValues().length;
-    const channels = products * granularities;
-    const rate = channels / this.MAX_CALLS_PER_SECOND;
-
-    return rate * 1000;
   }
 }

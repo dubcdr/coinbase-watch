@@ -58,7 +58,6 @@ export class ProductsService implements OnModuleInit {
   }
 
   public getGranularityValues(): number[] {
-    // return [60];
     return Object.keys(CandleGranularity)
       .map((g) => parseInt(g))
       .filter((g) => !isNaN(g));

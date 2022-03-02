@@ -23,9 +23,10 @@ const granularityMap = new Map<CandleGranularity, string>([
 export class LoggerService extends ConsoleLogger {
   logProduct(data: IntervalLogData) {
     const { start, end, product, granularity, action } = data;
-    let msg = `${action}\t|| ${product}\t|| ${granularityMap
-      .get(granularity)
-      .padStart(3, ' ')}`;
+    let msg = `${action.padEnd(25, ' ')} || ${product.padEnd(
+      8,
+      ' ',
+    )} || ${granularityMap.get(granularity).padStart(3, ' ')}`;
     if (start !== undefined) {
       msg = `${msg} || ${this.formatDate(start)}`;
     }
@@ -39,6 +40,6 @@ export class LoggerService extends ConsoleLogger {
     if (date === undefined) {
       return 'None';
     }
-    return format(date, 'dd-MM-yyyy::HH:mm');
+    return format(date, 'HH:mm-dd/MM/yyyy');
   }
 }

@@ -148,7 +148,8 @@ export class CandleService {
         candles[0]?.openTimeInISO,
         candles[candles.length - 1]?.openTimeInISO,
       ])
-      .orderBy('open_timestamp', 'asc');
+      .orderBy('open_timestamp', 'asc')
+      .select('open_timestamp');
 
     return from(previousPromise).pipe(
       map((previous) => {
