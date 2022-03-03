@@ -1,45 +1,120 @@
-import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
-import CoinbasePro, { Candle, CandleGranularity } from 'coinbase-pro-node';
-import { addDays, addSeconds, isAfter, isBefore } from 'date-fns';
+import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
+import CoinbasePro, { CandleGranularity } from 'coinbase-pro-node';
+import { addSeconds, isBefore } from 'date-fns';
 import {
-  forkJoin,
-  interval,
-  catchError,
   Observable,
-  Subject,
+  from,
+  of,
+  interval,
+  takeWhile,
   switchMap,
-  takeUntil,
+  forkJoin,
+  finalize,
   tap,
+  mergeMap,
 } from 'rxjs';
 import { CandleService } from 'src/candle/candle.service';
 import { IntervalLogData, LoggerService } from 'src/logger/logger.service';
 import { ProductsService } from 'src/products/products.service';
 
+export interface CandleApiParams {
+  granularity: CandleGranularity;
+  product: string;
+  start: Date;
+  end: Date;
+}
+
 @Injectable()
 export class HistoricService implements OnModuleInit {
+  private readonly FETCH_INTERVAL = 110;
   constructor(
     @Inject('COINBASE_CLIENT') private client: CoinbasePro,
     private productService: ProductsService,
     private candleService: CandleService,
     private logger: LoggerService,
   ) {
-    logger.setContext('Historic');
+    logger.setContext('Historic'.slice(0, 6));
   }
 
   async onModuleInit() {
-    return new Promise((resolve, reject) => {
-      this._getHistoricData().then((subj) => {
-        subj.subscribe(() => {
-          this.logger.log('Inserted historic data...');
-          this.candleService.setupListeners();
-          resolve(true);
-        });
-      });
+    const map = await this._getHistoricDataParamMap();
+    const initialCallParams: CandleApiParams[] = [];
+    const subsequentCalls: CandleApiParams[] = [];
+    for (const key of map.keys()) {
+      const promises = map.get(key);
+      initialCallParams.push(promises.splice(0, 1)[0]);
+    }
+    for (const key of map.keys()) {
+      const promises = map.get(key);
+      subsequentCalls.push(...promises);
+    }
+
+    return new Promise((res) => {
+      this.paramsToObservable(initialCallParams)
+        .pipe(
+          finalize(() => {
+            this.candleService.setupListeners();
+            this.logger.log(`Finished fetching initial historical`);
+            this._fetchRemainingCandles(subsequentCalls);
+            res(true);
+          }),
+        )
+        .subscribe();
     });
   }
 
-  private async _getHistoricData() {
-    const observables = {};
+  private _fetchRemainingCandles(params: CandleApiParams[]) {
+    this.paramsToObservable(params)
+      .pipe(
+        finalize(() => {
+          this.logger.log('Finished fetching historical');
+        }),
+      )
+      .subscribe();
+  }
+
+  private paramsToObservable(params: CandleApiParams[]): Observable<any> {
+    return interval(this.FETCH_INTERVAL).pipe(
+      takeWhile(() => params.length > 0),
+      mergeMap(() => {
+        const [param] = params.splice(0, 1);
+        const calls = {
+          params: of(param),
+          candles: from(
+            this.client.rest.product.getCandles(param.product, {
+              granularity: param.granularity,
+              start: param.start.toISOString(),
+              end: param.end.toISOString(),
+            }),
+          ),
+        };
+        return forkJoin(calls);
+      }),
+      tap(({ candles, params }) => {
+        if (candles.length > 0) {
+          this.logger.logProduct({
+            action: `Received Candles (${candles.length})`,
+            product: params.product,
+            granularity: params.granularity,
+            start: new Date(candles[0].openTimeInISO),
+            end: new Date(candles[candles.length - 1].openTimeInISO),
+          });
+        }
+      }),
+      switchMap((resp) => {
+        return this.candleService.writeCandles(
+          resp.params.product,
+          resp.candles,
+          resp.params.granularity,
+        );
+      }),
+    );
+  }
+
+  private async _getHistoricDataParamMap(): Promise<
+    Map<string, CandleApiParams[]>
+  > {
+    const promisesMap = new Map<string, CandleApiParams[]>();
     for (const product of this.productService.products) {
       for (const granularity of this.productService.getGranularityValues()) {
         const endDate = new Date();
@@ -69,74 +144,59 @@ export class HistoricService implements OnModuleInit {
             product,
             granularity,
           };
-          this.logger.logProduct(logData);
           startDate = mostRecentCandleDate;
         }
         this.logger.logProduct(logData);
-        const observable = this._getHistoricDataForGranularity(
+        const promise = this.buildProductGranularityParams(
           product,
+          granularity,
           startDate,
           endDate,
-          granularity,
-        ).pipe(
-          switchMap((candles) => {
-            return this.candleService.writeCandles(
-              product,
-              candles,
-              granularity,
-            );
-          }),
         );
-        observables[`${product}-${granularity}`] = observable;
+        promisesMap.set(`${product}-${granularity}`, promise);
       }
     }
-
-    return forkJoin(observables);
+    return promisesMap;
   }
 
   // candle granularity is in seconds
   // can fetch 300 candles in one api call
-  private _getHistoricDataForGranularity(
+  buildProductGranularityParams(
     product: string,
+    granularity: CandleGranularity,
     start: Date,
     end: Date,
-    granularity: CandleGranularity,
-  ): Observable<Candle[]> {
-    const intervalTime = 299 * granularity;
-    const finished = new Subject<void>();
-    let tempEnd = addSeconds(start, intervalTime);
-    return interval(this._getFetchInterval()).pipe(
-      takeUntil(finished),
-      switchMap(() => {
-        return this.client.rest.product.getCandles(product, {
-          granularity,
-          start: start.toISOString(),
-          end: tempEnd.toISOString(),
-        });
-      }),
-      catchError((err) => {
-        this.logger.error(`Error fetching candles`);
-        this.logger.error(JSON.stringify(err, null, 2));
-        throw 'Error fetching candles';
-      }),
-      tap(() => {
-        start = addDays(addSeconds(start, intervalTime), 1);
-        tempEnd = addSeconds(start, intervalTime);
+  ): CandleApiParams[] {
+    const params = new Array<CandleApiParams>();
+    const intervalTime = 300 * granularity;
+    const secondsBetween = Math.floor((end.getTime() - start.getTime()) / 1000);
+    const fullPulls = Math.floor(secondsBetween / intervalTime);
 
-        if (isAfter(start, end)) {
-          finished.next();
-          finished.complete();
-        }
-      }),
-    );
-  }
+    for (let i = 0; i < fullPulls; i++) {
+      const tempEnd = addSeconds(end, -1 * i * intervalTime);
+      const tempStart = addSeconds(end, (-1 * i - 1) * intervalTime);
+      params.push({
+        end: tempEnd,
+        start: tempStart,
+        granularity,
+        product,
+      });
+    }
 
-  private _getFetchInterval(): number {
-    const products = this.productService.products.size;
-    const granularities = this.productService.getGranularityValues().length;
-    const channels = products * granularities;
-    const rate = channels / 15;
+    const remaining = Math.floor((secondsBetween % intervalTime) / granularity);
+    this.logger.logProduct({
+      granularity,
+      product,
+      action: `Seconds between\t${secondsBetween}\tFull Pulls ${fullPulls}\tRemaining ${remaining}`,
+    });
 
-    return rate * 1000;
+    params.push({
+      granularity,
+      product,
+      start,
+      end: addSeconds(start, remaining * granularity),
+    });
+
+    return params;
   }
 }
