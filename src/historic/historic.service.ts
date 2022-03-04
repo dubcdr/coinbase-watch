@@ -1,6 +1,6 @@
 import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
 import CoinbasePro, { CandleGranularity } from 'coinbase-pro-node';
-import { addSeconds, isBefore } from 'date-fns';
+import { addSeconds, isAfter } from 'date-fns';
 import {
   Observable,
   from,
@@ -114,7 +114,7 @@ export class HistoricService implements OnModuleInit {
   private async _getHistoricDataParamMap(): Promise<
     Map<string, CandleApiParams[]>
   > {
-    const promisesMap = new Map<string, CandleApiParams[]>();
+    const paramsMap = new Map<string, CandleApiParams[]>();
     for (const product of this.productService.products) {
       for (const granularity of this.productService.getGranularityValues()) {
         const endDate = new Date();
@@ -127,8 +127,10 @@ export class HistoricService implements OnModuleInit {
         let logData: IntervalLogData;
         if (mostRecentCandleDate === undefined) {
           const envStartDate = this.productService.getEnvStartDate();
-          startDate = isBefore(mostRecentCandleDate, envStartDate)
-            ? mostRecentCandleDate
+          const productStartDate =
+            await this.productService.getProductStartDate(product);
+          startDate = isAfter(productStartDate, envStartDate)
+            ? productStartDate
             : envStartDate;
           logData = {
             start: startDate,
@@ -144,19 +146,19 @@ export class HistoricService implements OnModuleInit {
             product,
             granularity,
           };
-          startDate = mostRecentCandleDate;
+          startDate = addSeconds(mostRecentCandleDate, granularity);
         }
         this.logger.logProduct(logData);
-        const promise = this.buildProductGranularityParams(
+        const params = this.buildProductGranularityParams(
           product,
           granularity,
           startDate,
           endDate,
         );
-        promisesMap.set(`${product}-${granularity}`, promise);
+        paramsMap.set(`${product}-${granularity}`, params);
       }
     }
-    return promisesMap;
+    return paramsMap;
   }
 
   // candle granularity is in seconds
