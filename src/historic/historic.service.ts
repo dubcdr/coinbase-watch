@@ -155,7 +155,9 @@ export class HistoricService implements OnModuleInit {
           startDate,
           endDate,
         );
-        paramsMap.set(`${product}-${granularity}`, params);
+        if (params.length > 0) {
+          paramsMap.set(`${product}-${granularity}`, params);
+        }
       }
     }
     return paramsMap;
@@ -173,6 +175,11 @@ export class HistoricService implements OnModuleInit {
     const intervalTime = 300 * granularity;
     const secondsBetween = Math.floor((end.getTime() - start.getTime()) / 1000);
     const fullPulls = Math.floor(secondsBetween / intervalTime);
+
+    if (secondsBetween <= 0) {
+      // todo: this means we pulled data too soon i think
+      return [];
+    }
 
     for (let i = 0; i < fullPulls; i++) {
       const tempEnd = addSeconds(end, -1 * i * intervalTime);
