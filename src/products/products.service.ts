@@ -1,7 +1,11 @@
 import { Inject, Injectable, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import CoinbasePro, { Candle, CandleGranularity } from 'coinbase-pro-node';
-import { parse, addDays, differenceInDays } from 'date-fns';
+import CoinbasePro, {
+  Candle,
+  CandleGranularity,
+  Product,
+} from 'coinbase-pro-node';
+import { parse, addDays, differenceInDays, addSeconds } from 'date-fns';
 import { Knex } from 'knex';
 import { IntervalLogData, LoggerService } from 'src/logger/logger.service';
 
@@ -33,8 +37,11 @@ export class ProductsService implements OnModuleInit {
   }
 
   async onModuleInit() {
+    const coinbaseProducts = await this.client.rest.product.getProducts();
     const productStrings = this.configService.get('PRODUCTS');
+
     this._products = new Set<string>(productStrings.split(','));
+    this._validateDesiredProducts(this._products, coinbaseProducts);
 
     await this._initTable();
     await this._initCandleTables();
@@ -46,6 +53,21 @@ export class ProductsService implements OnModuleInit {
       this.products,
     );
     await this._initializeProducts(uninitializedProducts);
+  }
+  private _validateDesiredProducts(
+    products: Set<string>,
+    coinbaseProducts: Product[],
+  ) {
+    for (const product of products) {
+      const isCoinbaseProduct = coinbaseProducts.some(
+        (cp) => cp.id === product,
+      );
+      if (!isCoinbaseProduct) {
+        const errMessage = `${product} is not supported by Coinbase`;
+        this.logger.error(errMessage);
+        throw new Error(errMessage);
+      }
+    }
   }
 
   async getProductStartDate(product: string) {
@@ -142,12 +164,12 @@ export class ProductsService implements OnModuleInit {
     let leftDate = this.getEnvStartDate();
     let rightDate = new Date();
     let leftDateCandles: Candle[];
-    const granularity = CandleGranularity.ONE_DAY;
+    const granularity = CandleGranularity.ONE_MINUTE;
     try {
       leftDateCandles = await this.client.rest.product.getCandles(product, {
         start: leftDate.toISOString(),
         end: addDays(leftDate, 1).toISOString(),
-        granularity: CandleGranularity.ONE_DAY,
+        granularity,
       });
     } catch (error) {
       leftDateCandles = [];
@@ -165,6 +187,7 @@ export class ProductsService implements OnModuleInit {
     while (differenceInDays(rightDate, leftDate) !== 1) {
       [leftDate, rightDate] = await this._binomialSearch(
         product,
+        granularity,
         leftDate,
         rightDate,
       );
@@ -176,6 +199,7 @@ export class ProductsService implements OnModuleInit {
 
   private async _binomialSearch(
     product: string,
+    granularity: CandleGranularity,
     leftDate: Date,
     rightDate: Date,
   ): Promise<Date[]> {
@@ -183,7 +207,6 @@ export class ProductsService implements OnModuleInit {
     const midpoint = new Date(midpointMillis);
     let midpointCandles: Candle[];
 
-    const granularity = CandleGranularity.ONE_DAY;
     const logData: IntervalLogData = {
       product,
       granularity,
@@ -199,9 +222,9 @@ export class ProductsService implements OnModuleInit {
 
     try {
       midpointCandles = await this.client.rest.product.getCandles(product, {
-        granularity: CandleGranularity.ONE_DAY,
+        granularity,
         start: midpoint.toISOString(),
-        end: addDays(midpoint, 1).toISOString(),
+        end: addSeconds(midpoint, granularity).toISOString(),
       });
     } catch (err) {
       midpointCandles = [];
